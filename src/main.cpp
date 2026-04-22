@@ -4,6 +4,7 @@
 #include <numeric>
 #include <algorithm>
 #include <random>
+#include <unistd.h>
 #include <mpi.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -39,11 +40,22 @@ int main(int argc, char** argv) {
     // Assign one GPU per MPI rank (round-robin within node)
     int n_gpus = 0;
     CUDA_CHECK(cudaGetDeviceCount(&n_gpus));
-    int local_rank = rank % n_gpus;  // works when ranks are packed 1-per-GPU
+    int local_rank = rank % n_gpus;
     CUDA_CHECK(cudaSetDevice(local_rank));
+
+    // Print rank→GPU→hostname mapping from every rank so we can verify
+    // cross-node assignment is correct (ranks packed consecutively per node).
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    // Serialize output: rank 0 prints first, then signals next rank
+    for (int r = 0; r < world; r++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == r)
+            printf("[Init] rank %d → GPU %d @ %s\n", rank, local_rank, hostname);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0)
-        printf("[Init] %d ranks, %d GPUs detected, rank→GPU mapping: round-robin\n",
-               world, n_gpus);
+        printf("[Init] %d ranks total, %d GPUs per node\n", world, n_gpus);
 
     // -----------------------------------------------------------------------
     // Load & scatter training data
