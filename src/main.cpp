@@ -192,16 +192,22 @@ int main(int argc, char** argv) {
             CUDA_CHECK(cudaDeviceSynchronize());
             timer.stop_compute();
 
-            // ------- AllReduce gradients -------
-            // Pack → MPI_Allreduce (sum) → scale by 1/world → unpack
+            // ------- AllReduce gradients (3-phase timing) -------
             timer.start();
-            model.pack_gradients(h_grads);
+            model.pack_gradients(h_grads);   // D→H
+            timer.stop_d2h();
+
+            timer.start();
             MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n,
                           MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+            timer.stop_mpi();
+
+            // Scale by 1/P then copy back to device (both counted as h2d overhead)
             float inv_P = 1.0f / world;
             for (int i = 0; i < grad_n; i++) h_grads[i] *= inv_P;
-            model.unpack_gradients(h_grads);
-            timer.stop_comm();
+            timer.start();
+            model.unpack_gradients(h_grads); // H→D
+            timer.stop_h2d();
 
             // ------- SGD update -------
             CUDA_CHECK(cudaDeviceSynchronize());
