@@ -1,0 +1,1 @@
+  -L"/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/targets/x86_64-linux/lib/stubs"  -L"/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/targets/x86_64-linux/lib"   -ldl /usr/lib64/librt.a "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/targets/x86_64-linux/lib/libculibos.a" -lcudadevrt -lcudart_static -lrt -lpthread 

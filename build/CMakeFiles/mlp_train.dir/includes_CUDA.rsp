@@ -1,0 +1,1 @@
+-I"/global/u2/e/eulawang/cs5220-project/src" -isystem "/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/targets/x86_64-linux/include"
