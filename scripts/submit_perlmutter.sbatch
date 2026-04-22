@@ -20,8 +20,9 @@ module load cray-mpich/9.0.1
 PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 BUILD_DIR="$PROJECT_ROOT/build"
 
-# Enable CUDA-aware MPI (Cray MPICH supports it natively on Perlmutter)
-export MPICH_GPU_SUPPORT_ENABLED=1
+# Phase 1: gradients go through host buffer, so disable GPU-aware MPI.
+# Phase 2: re-enable once we link the GTL library or switch to NCCL.
+export MPICH_GPU_SUPPORT_ENABLED=0
 
 # ---------------------------------------------------------------------------
 # Experiment 1: Small network (latency-bound, expect tree to win in Phase 2)
