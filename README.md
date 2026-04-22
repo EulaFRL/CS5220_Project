@@ -1,0 +1,332 @@
+# Parallel Neural Network Training with MPI
+
+CS 5220 Project — Ruichen Bao (rb945) & Jingyu Wang (jw2953)
+
+Data-parallel SGD for a configurable MLP, implemented from scratch in C++/CUDA with MPI. The project compares **Tree Reduction** and **Ring AllReduce** gradient aggregation strategies across small and large network sizes on Perlmutter (A100 GPUs).
+
+---
+
+## Repository Structure
+
+```
+cs5220-project/
+├── CMakeLists.txt
+├── src/
+│   ├── config.h              # CLI argument parsing, Config struct
+│   ├── timer.h               # Split timer: compute / d2h / mpi / h2d
+│   ├── data/
+│   │   ├── data_loader.h
+│   │   └── data_loader.cpp   # Fashion-MNIST IDX reader + MPI scatter
+│   ├── mlp/
+│   │   ├── activations.cuh   # CUDA kernels: ReLU, softmax+CE, bias, SGD
+│   │   ├── mlp.h
+│   │   └── mlp.cu            # MLP forward, backward, update, pack/unpack grads
+│   ├── comm/                 # ← Phase 2: communication backends go here
+│   │   └── comm_base.h       # Abstract AllReduce interface (see Phase 2 section)
+│   └── main.cpp              # Training loop with 3-phase timed allreduce
+├── scripts/
+│   ├── download_data.sh      # Fetch Fashion-MNIST from GitHub mirror
+│   ├── run_local.sh          # Local build + smoke test
+│   ├── smoke_test.sbatch     # Single-GPU SLURM test job
+│   └── submit_perlmutter.sbatch  # Full experiment job (2 nodes, 8 GPUs)
+└── data/
+    └── fashion-mnist/        # Downloaded by download_data.sh
+```
+
+---
+
+## Environment (Perlmutter)
+
+The following modules are already loaded in the standard Perlmutter GPU environment:
+
+```bash
+module load cudatoolkit/12.9
+module load cray-mpich/9.0.1
+```
+
+**Important:** Always set `MPICH_GPU_SUPPORT_ENABLED=0` before running. Our gradient allreduce stages through pinned host memory (explicit D→H / H→D copies), so we do not use CUDA-aware MPI. Setting it to 1 causes a GTL linker error at runtime.
+
+---
+
+## Build
+
+```bash
+cd cs5220-project
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=$(which mpicxx) \
+  -DCMAKE_CUDA_COMPILER=$(which nvcc) \
+  -Wno-dev
+cmake --build build -j$(nproc)
+# Produces: build/mlp_train
+```
+
+---
+
+## Get the Data
+
+```bash
+bash scripts/download_data.sh
+# Downloads and unpacks 4 IDX binary files into data/fashion-mnist/
+```
+
+---
+
+## Running
+
+### Interactive session (recommended for testing)
+
+```bash
+salloc -C gpu -G 1 --nodes 1 --qos interactive --time 0:30:00 -A m4341
+
+# Single rank
+MPICH_GPU_SUPPORT_ENABLED=0 srun build/mlp_train \
+  --layers 784,256,128,10 \
+  --batch 256 --epochs 5 --lr 0.01 \
+  --data data/fashion-mnist
+
+# Multi-rank (4 GPUs, 1 node)
+MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=4 build/mlp_train \
+  --layers 784,256,128,10 \
+  --batch 256 --epochs 5 --lr 0.01 \
+  --data data/fashion-mnist
+```
+
+### SLURM batch job (2 nodes, 8 GPUs)
+
+```bash
+sbatch scripts/submit_perlmutter.sbatch
+```
+
+---
+
+## CLI Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--layers A,B,...,Z` | `784,256,128,10` | Network architecture. First must be 784, last must be 10. |
+| `--batch N` | `256` | Mini-batch size **per rank** |
+| `--epochs N` | `10` | Number of training epochs |
+| `--lr F` | `0.01` | SGD learning rate |
+| `--algo NAME` | `mpi_builtin` | Allreduce backend: `mpi_builtin` \| `tree` \| `ring` |
+| `--data PATH` | `./data/fashion-mnist` | Path to Fashion-MNIST IDX files |
+
+### Example: reproduce small-network (latency-bound) vs large-network (bandwidth-bound)
+
+```bash
+# Small: expect tree to win in Phase 2
+MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=8 build/mlp_train \
+  --layers 784,64,10 --batch 256 --epochs 5 --algo tree
+
+# Large: expect ring to win in Phase 2
+MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=8 build/mlp_train \
+  --layers 784,2048,2048,2048,10 --batch 256 --epochs 5 --algo ring
+```
+
+---
+
+## Output Format
+
+Each epoch prints two lines:
+
+```
+[Epoch  2/5] loss=0.7503  test_acc=0.7625  time=0.122s
+[Epoch  2] compute=0.0477s  d2h=0.0176s  mpi=0.0000s  h2d=0.0186s  comm_total=0.0362s  total=0.0838s  mpi%=0.0%
+```
+
+| Field | Meaning |
+|---|---|
+| `compute` | GPU time: forward pass + backward pass + SGD update |
+| `d2h` | Device→host memcpy of all gradients (PCIe, baseline cost) |
+| `mpi` | **Pure MPI algorithm time** (Allreduce / Tree / Ring) — the key metric for Phase 3 comparison |
+| `h2d` | CPU gradient scaling (÷P) + host→device memcpy |
+| `mpi%` | `mpi / total` — isolates network communication from PCIe overhead |
+
+**Why separate d2h/mpi/h2d?** With 1 rank, `d2h ≈ h2d ≈ 18ms` and `mpi ≈ 0ms`. This 36ms is unavoidable PCIe baseline cost shared by all algorithms. Phase 3 α-β analysis uses only the `mpi` column.
+
+---
+
+## Architecture: MLP
+
+**File:** `src/mlp/mlp.h` + `src/mlp/mlp.cu`
+
+All matrices are stored **column-major** (cuBLAS convention). For a matrix of shape `(rows × cols)`, element `(r, c)` lives at index `r + c * rows`.
+
+```
+Input X: (n_features × batch)   ← matches how Fashion-MNIST is laid out in memory
+Layer l: Z = W*X + b             ← cublasSgemm
+         A = ReLU(Z)             ← hidden layers
+         A = Softmax(Z)          ← output layer (also computes CE loss and dZ)
+```
+
+### Key methods
+
+```cpp
+MLP model(layer_sizes, max_batch);
+
+// Forward pass. X and labels are device pointers.
+// Returns average cross-entropy loss over the batch.
+float loss = model.forward(d_X, d_labels, batch_size);
+
+// Backward pass. Populates dW and db for each layer.
+// Call zero_grad() first to clear accumulators.
+model.zero_grad();
+model.backward();
+
+// Gradient communication interface (Phase 2 hook):
+model.pack_gradients(h_buf);    // device → pinned host, size = grad_total_size()
+// ... run your allreduce on h_buf here ...
+model.unpack_gradients(h_buf);  // pinned host → device
+
+// How many floats in the gradient buffer (dW+db for all layers):
+int n = model.grad_total_size();
+
+// SGD weight update (after allreduce):
+model.update(lr);
+
+// Evaluation (runs forward on device array, returns fraction correct):
+float acc = model.accuracy(d_X, d_labels, n_samples);
+```
+
+### Layer access (for Phase 2 layer-wise pipelining)
+
+```cpp
+for (int l = 0; l < model.n_layers(); l++) {
+    Layer& la = model.layer(l);
+    // la.W, la.b    — weight/bias device pointers
+    // la.dW, la.db  — gradient device pointers
+    // la.fin, la.fout — dimensions
+    // gradient buffer size: la.fout * la.fin + la.fout floats
+}
+```
+
+---
+
+## Architecture: Data Loading
+
+**File:** `src/data/data_loader.h` + `data_loader.cpp`
+
+```cpp
+// Rank 0 only: load full dataset from IDX binary files
+Dataset train = load_fashion_mnist("data/fashion-mnist", /*is_train=*/true);
+Dataset test  = load_fashion_mnist("data/fashion-mnist", /*is_train=*/false);
+
+// All ranks: rank 0 scatters shards via MPI_Scatter
+// Each rank receives local_n = n_total / world_size samples
+Dataset local = scatter_dataset(train, rank, world_size);
+
+// local.images: float[n_samples * 784], layout (n_features × n_samples) column-major
+// local.labels: int[n_samples]
+```
+
+Memory layout note: `images[s * 784 + f]` for sample `s`, feature `f`. A contiguous slice of `batch_size` samples starting at index `s` is directly usable as the input matrix `(784 × batch_size)` in column-major order — no transposition needed before passing to `model.forward()`.
+
+---
+
+## Architecture: Timer
+
+**File:** `src/timer.h`
+
+```cpp
+Timer timer;
+timer.reset();                          // zero all accumulators
+
+cudaDeviceSynchronize();
+timer.start();
+// ... GPU compute work ...
+cudaDeviceSynchronize();
+timer.stop_compute();
+
+timer.start();
+model.pack_gradients(h_buf);            // includes internal cudaDeviceSynchronize
+timer.stop_d2h();
+
+timer.start();
+MPI_Allreduce(...);                     // your algorithm here
+timer.stop_mpi();
+
+timer.start();
+model.unpack_gradients(h_buf);
+timer.stop_h2d();
+
+timer.report_epoch(rank, epoch);        // prints only on rank 0
+```
+
+---
+
+## Phase 2: Adding a New AllReduce Backend
+
+**This is what needs to be implemented next (Task A: Tree Reduction, Task B: Ring AllReduce).**
+
+### Step 1 — Create the implementation file
+
+Add `src/comm/tree_reduce.cpp` (or `.cu` if CUDA is needed). Implement this function:
+
+```cpp
+// Signature to match: reduces h_buf in-place (sum across ranks), then scales by 1/world_size
+void tree_allreduce(float* h_buf, int n, MPI_Comm comm, int rank, int world_size);
+```
+
+The hook points in `main.cpp` are already in place — the three-line allreduce block:
+
+```cpp
+// In main.cpp, inside the training loop:
+timer.start();
+MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+timer.stop_mpi();
+```
+
+Replace the `MPI_Allreduce` call with your algorithm, selected via `cfg.comm_algo`.
+
+### Step 2 — Wire up the `--algo` flag
+
+In `main.cpp`, the dispatch block to add:
+
+```cpp
+timer.start();
+if (cfg.comm_algo == "mpi_builtin") {
+    MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+} else if (cfg.comm_algo == "tree") {
+    tree_allreduce(h_grads, grad_n, MPI_COMM_WORLD, rank, world);
+} else if (cfg.comm_algo == "ring") {
+    ring_allreduce(h_grads, grad_n, MPI_COMM_WORLD, rank, world);
+}
+timer.stop_mpi();
+```
+
+### Tree Reduction algorithm sketch
+
+```
+// Recursive halving/doubling — O(log P) steps, each sends full buffer N floats
+// Works correctly only when P is a power of 2.
+for (int step = 0; step < log2(P); step++) {
+    partner = rank XOR (1 << step);
+    if (rank < partner) {
+        recv buffer from partner into tmp;
+        buf += tmp;              // element-wise sum
+    } else {
+        send buf to partner;
+        // this rank is done (becomes inactive in subsequent steps)
+    }
+}
+// Broadcast result from rank 0 back to all ranks
+MPI_Bcast(buf, n, MPI_FLOAT, 0, comm);
+```
+
+Cost model: `T_tree = ceil(log2 P) * (α + β*N)`
+
+### Tested baseline (1 rank, medium network)
+
+```
+compute=0.0477s  d2h=0.0176s  mpi=0.0000s  h2d=0.0186s  total=0.0838s
+```
+With P>1, `mpi` will increase. The hypothesis is `mpi_tree < mpi_ring` for small N, `mpi_ring < mpi_tree` for large N.
+
+---
+
+## Known Issues / Notes
+
+- **P must divide 60000 evenly** for the data scatter. P=1,2,4,8 all work (60000/8=7500). If using a non-divisor, the loader truncates to the nearest multiple.
+- **Tree Reduction requires P = power of 2.** For other values, fall back to `mpi_builtin`.
+- **Accuracy baseline:** `{784,256,128,10}`, 5 epochs, lr=0.01 → ~80.8% test accuracy. Expect ~85%+ with 10+ epochs or a larger network.
+- The `accuracy()` method runs a forward pass internally and reuses the model's layer buffers — do not call it concurrently with training.
