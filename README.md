@@ -142,7 +142,7 @@ Each epoch prints two lines:
 | `h2d` | CPU gradient scaling (÷P) + host→device memcpy |
 | `mpi%` | `mpi / total` — isolates network communication from PCIe overhead |
 
-**Why separate d2h/mpi/h2d?** With 1 rank, `d2h ≈ h2d ≈ 18ms` and `mpi ≈ 0ms`. This 36ms is unavoidable PCIe baseline cost shared by all algorithms. Phase 3 α-β analysis uses only the `mpi` column.
+**Why separate d2h/mpi/h2d?** With 1 rank, `d2h ≈ h2d ≈ 4.5ms` per epoch and `mpi ≈ 0ms`. This PCIe cost is unavoidable and shared by all algorithms. Phase 3 α-β analysis uses only the `mpi` column to compare Tree vs Ring.
 
 ---
 
@@ -315,12 +315,22 @@ MPI_Bcast(buf, n, MPI_FLOAT, 0, comm);
 
 Cost model: `T_tree = ceil(log2 P) * (α + β*N)`
 
-### Tested baseline (1 rank, medium network)
+### Verified baselines
 
+**1 rank, `{784,256,128,10}`, batch=256, epoch 2–5:**
 ```
-compute=0.0477s  d2h=0.0176s  mpi=0.0000s  h2d=0.0186s  total=0.0838s
+compute=0.0477s  d2h=0.0176s  mpi=0.0000s  h2d=0.0186s  total=0.0838s  mpi%=0.0%
+test_acc after 5 epochs: 80.8%
 ```
-With P>1, `mpi` will increase. The hypothesis is `mpi_tree < mpi_ring` for small N, `mpi_ring < mpi_tree` for large N.
+
+**4 ranks (1 node), `{784,256,128,10}`, batch=256, epoch 2–5:**
+```
+compute=0.0121s  d2h=0.0044s  mpi=0.0260s  h2d=0.0048s  total=0.0472s  mpi%=55.1%
+test_acc after 5 epochs: 73.0%
+```
+The lower accuracy at P=4 is expected: each rank sees only 15000/60000 samples and makes 58 gradient updates per epoch vs 234 at P=1. Accuracy converges to the same level with more epochs.
+
+With P>1, `mpi` will increase further. The hypothesis is `mpi_tree < mpi_ring` for small N (latency-bound), `mpi_ring < mpi_tree` for large N (bandwidth-bound).
 
 ---
 
