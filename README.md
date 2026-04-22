@@ -1,6 +1,6 @@
 # Parallel Neural Network Training with MPI
 
-CS 5220 Project — Ruichen Bao (rb945) & Jingyu Wang (jw2953)
+CS 5220 Project
 
 Data-parallel SGD for a configurable MLP, implemented from scratch in C++/CUDA with MPI. The project compares **Tree Reduction** and **Ring AllReduce** gradient aggregation strategies across small and large network sizes on Perlmutter (A100 GPUs).
 
