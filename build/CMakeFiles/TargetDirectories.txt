@@ -1,3 +1,0 @@
-/global/u2/e/eulawang/cs5220-project/build/CMakeFiles/mlp_train.dir
-/global/u2/e/eulawang/cs5220-project/build/CMakeFiles/edit_cache.dir
-/global/u2/e/eulawang/cs5220-project/build/CMakeFiles/rebuild_cache.dir
