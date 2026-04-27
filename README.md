@@ -286,67 +286,28 @@ timer.report_epoch(rank, epoch);        // prints only on rank 0
 
 ---
 
-## Phase 2: Adding a New AllReduce Backend
+## Phase 2: Communication primitives
 
-**This is what needs to be implemented next (Task A: Tree Reduction, Task B: Ring AllReduce).**
-
-### Step 1 — Create the implementation file
-
-Add `src/comm/tree_reduce.cpp` (or `.cu` if CUDA is needed). Implement this function:
-
-```cpp
-// Signature to match: reduces h_buf in-place (sum across ranks), then scales by 1/world_size
-void tree_allreduce(float* h_buf, int n, MPI_Comm comm, int rank, int world_size);
-```
-
-The hook points in `main.cpp` are already in place — the three-line allreduce block:
-
-```cpp
-// In main.cpp, inside the training loop:
-timer.start();
-MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
-timer.stop_mpi();
-```
-
-`main.cpp` already dispatches on `--algo`: `ring` calls `ring_allreduce_sum_inplace`, and `tree` currently falls back to `MPI_Allreduce` with a one-time stderr warning until Task A is implemented.
-
-Correctness check (no GPU, no dataset):
+**Task A — Tree reduction (`MPI_Reduce` semantics):** binomial tree sum to one root in `src/comm/tree_reduce.{h,cpp}`. This is **not** an allreduce: only the root holds the global sum. Use it for latency experiments on **small** gradient vectors (shallow/narrow MLP). Build and test:
 
 ```bash
 cmake --build build -j
+MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=4 ./build/tree_reduce_test 64 2000
+# argv: [n] [bench_iters]  — bench_iters 0 skips timing; >0 prints tree vs MPI_Reduce latency on rank 0
+sbatch scripts/quick_tree_test.sbatch
+```
+
+**Task B — Ring allreduce:** `ring_allreduce_sum_inplace` in `src/comm/ring_allreduce.cpp`; training uses `--algo ring`. Correctness:
+
+```bash
 MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=4 ./build/ring_allreduce_test 10007
 ```
 
-### Step 2 — Tree reduction (Task A, optional next)
+`mlp_train` supports `--algo mpi_builtin|ring` (full gradient sync requires an allreduce, not a reduce-only primitive).
 
-In `main.cpp`, extend the dispatch block:
+### Tree reduce cost model (latency-oriented small `n`)
 
-```cpp
-} else if (cfg.comm_algo == "tree") {
-    tree_allreduce_sum_inplace(h_grads, grad_n, MPI_COMM_WORLD);
-}
-```
-
-### Tree Reduction algorithm sketch
-
-```
-// Recursive halving/doubling — O(log P) steps, each sends full buffer N floats
-// Works correctly only when P is a power of 2.
-for (int step = 0; step < log2(P); step++) {
-    partner = rank XOR (1 << step);
-    if (rank < partner) {
-        recv buffer from partner into tmp;
-        buf += tmp;              // element-wise sum
-    } else {
-        send buf to partner;
-        // this rank is done (becomes inactive in subsequent steps)
-    }
-}
-// Broadcast result from rank 0 back to all ranks
-MPI_Bcast(buf, n, MPI_FLOAT, 0, comm);
-```
-
-Cost model: `T_tree = ceil(log2 P) * (α + β*N)`
+Roughly `ceil(log2 P)` steps per child/parent message of size `n`: `T ≈ ceil(log2 P) * (α + β·n)` for the custom tree; compare to `MPI_Reduce` in `tree_reduce_test` when `bench_iters > 0`.
 
 ### Verified baselines
 
@@ -363,13 +324,13 @@ test_acc after 5 epochs: 73.0%
 ```
 The lower accuracy at P=4 is expected: each rank sees only 15000/60000 samples and makes 58 gradient updates per epoch vs 234 at P=1. Accuracy converges to the same level with more epochs.
 
-With P>1, `mpi` will increase further. The hypothesis is `mpi_tree < mpi_ring` for small N (latency-bound), `mpi_ring < mpi_tree` for large N (bandwidth-bound).
+With P>1, `mpi` will increase further. For **small** packed gradient size `N`, a tree-shaped reduce has fewer steps than ring allreduce’s `2(P-1)` steps; for **large** `N`, ring’s ring bandwidth pattern usually wins for full allreduce.
 
 ---
 
 ## Known Issues / Notes
 
 - **P must divide 60000 evenly** for the data scatter. P=1,2,4,8 all work (60000/8=7500). If using a non-divisor, the loader truncates to the nearest multiple.
-- **Tree Reduction requires P = power of 2.** For other values, fall back to `mpi_builtin`.
+- **Tree reduce** in this repo uses a binomial tree and works for **any** `P >= 1` (not only powers of two).
 - **Accuracy baseline:** `{784,256,128,10}`, 5 epochs, lr=0.01 → ~80.8% test accuracy. Expect ~85%+ with 10+ epochs or a larger network.
 - The `accuracy()` method runs a forward pass internally and reuses the model's layer buffers — do not call it concurrently with training.

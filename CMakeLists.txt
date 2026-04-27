@@ -46,6 +46,12 @@ target_include_directories(ring_allreduce_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(ring_allreduce_test PRIVATE MPI::MPI_CXX)
 
+add_executable(tree_reduce_test src/tools/tree_reduce_test.cpp
+    src/comm/tree_reduce.cpp)
+target_include_directories(tree_reduce_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(tree_reduce_test PRIVATE MPI::MPI_CXX)
+
 # grad_check target added when src/grad_check.cpp exists (Phase 1 validation)
 if(EXISTS "${CMAKE_SOURCE_DIR}/src/grad_check.cpp")
     add_executable(grad_check src/grad_check.cpp src/data/data_loader.cpp)
