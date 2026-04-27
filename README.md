@@ -21,8 +21,11 @@ cs5220-project/
 │   │   ├── activations.cuh   # CUDA kernels: ReLU, softmax+CE, bias, SGD
 │   │   ├── mlp.h
 │   │   └── mlp.cu            # MLP forward, backward, update, pack/unpack grads
-│   ├── comm/                 # ← Phase 2: communication backends go here
-│   │   └── comm_base.h       # Abstract AllReduce interface (see Phase 2 section)
+│   ├── comm/                 # Phase 2: custom collectives
+│   │   ├── ring_allreduce.h
+│   │   └── ring_allreduce.cpp
+│   ├── tools/
+│   │   └── ring_allreduce_test.cpp  # MPI-only correctness check vs MPI_Allreduce
 │   └── main.cpp              # Training loop with 3-phase timed allreduce
 ├── scripts/
 │   ├── download_data.sh      # Fetch Fashion-MNIST from GitHub mirror
@@ -76,21 +79,50 @@ bash scripts/download_data.sh
 
 ### Interactive session (recommended for testing)
 
+On Perlmutter **login nodes**, plain `srun --ntasks=4 ./app` is rejected (`Job request does not match any supported policy`) because no Slurm allocation exists yet. Either:
+
+1. **Get an interactive allocation first**, then run `srun` inside that shell (inherits the job step):
+
 ```bash
-salloc -C gpu -G 1 --nodes 1 --qos interactive --time 0:30:00 -A m4341
+# Replace --account if needed (course project example: m4341_g).
+salloc --account=m4341_g --constraint="gpu&hbm40g" --nodes=1 --ntasks=4 --gpus-per-node=4 \
+       --qos=interactive --time=0:30:00
+
+cd /path/to/CS5220_Project/build
+export MPICH_GPU_SUPPORT_ENABLED=0
+srun ./ring_allreduce_test 10007
+srun ./mlp_train --algo ring --epochs 1 --data ../data/fashion-mnist
+```
+
+2. **Or submit a batch script** (works from login; Slurm allocates the node for you):
+
+```bash
+cd /path/to/CS5220_Project
+mkdir -p logs
+# Uses m4341_g by default (edit scripts/quick_ring_test.sbatch if your account differs), then:
+sbatch scripts/quick_ring_test.sbatch
+```
+
+After `salloc` returns a shell (or any interactive GPU allocation), examples:
+
+```bash
+cd build
+export MPICH_GPU_SUPPORT_ENABLED=0
 
 # Single rank
-MPICH_GPU_SUPPORT_ENABLED=0 srun build/mlp_train \
+srun ./mlp_train \
   --layers 784,256,128,10 \
   --batch 256 --epochs 5 --lr 0.01 \
-  --data data/fashion-mnist
+  --data ../data/fashion-mnist
 
-# Multi-rank (4 GPUs, 1 node)
-MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=4 build/mlp_train \
+# Multi-rank (4 GPUs, 1 node) — omit extra srun flags; the allocation already defines task count
+srun ./mlp_train \
   --layers 784,256,128,10 \
   --batch 256 --epochs 5 --lr 0.01 \
-  --data data/fashion-mnist
+  --data ../data/fashion-mnist
 ```
+
+For four MPI ranks on one node, request `--ntasks=4 --gpus-per-node=4` in `salloc`.
 
 ### SLURM batch job (2 nodes, 8 GPUs)
 
@@ -276,22 +308,23 @@ MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD)
 timer.stop_mpi();
 ```
 
-Replace the `MPI_Allreduce` call with your algorithm, selected via `cfg.comm_algo`.
+`main.cpp` already dispatches on `--algo`: `ring` calls `ring_allreduce_sum_inplace`, and `tree` currently falls back to `MPI_Allreduce` with a one-time stderr warning until Task A is implemented.
 
-### Step 2 — Wire up the `--algo` flag
+Correctness check (no GPU, no dataset):
 
-In `main.cpp`, the dispatch block to add:
+```bash
+cmake --build build -j
+MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=4 ./build/ring_allreduce_test 10007
+```
+
+### Step 2 — Tree reduction (Task A, optional next)
+
+In `main.cpp`, extend the dispatch block:
 
 ```cpp
-timer.start();
-if (cfg.comm_algo == "mpi_builtin") {
-    MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
 } else if (cfg.comm_algo == "tree") {
-    tree_allreduce(h_grads, grad_n, MPI_COMM_WORLD, rank, world);
-} else if (cfg.comm_algo == "ring") {
-    ring_allreduce(h_grads, grad_n, MPI_COMM_WORLD, rank, world);
+    tree_allreduce_sum_inplace(h_grads, grad_n, MPI_COMM_WORLD);
 }
-timer.stop_mpi();
 ```
 
 ### Tree Reduction algorithm sketch

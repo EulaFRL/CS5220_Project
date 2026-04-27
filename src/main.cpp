@@ -13,6 +13,7 @@
 #include "timer.h"
 #include "data/data_loader.h"
 #include "mlp/mlp.h"
+#include "comm/ring_allreduce.h"
 
 // ---------------------------------------------------------------------------
 // Convenience macro for CUDA in main()
@@ -36,6 +37,18 @@ int main(int argc, char** argv) {
     // Parse CLI config
     Config cfg = parse_args(argc, argv);
     print_config(cfg, rank);
+
+    if (cfg.comm_algo != "mpi_builtin" && cfg.comm_algo != "ring" &&
+        cfg.comm_algo != "tree") {
+        if (rank == 0)
+            fprintf(stderr, "[Error] Unknown --algo %s (use mpi_builtin|ring|tree)\n",
+                    cfg.comm_algo.c_str());
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    if (cfg.comm_algo == "tree" && rank == 0) {
+        fprintf(stderr,
+                "[Warn] Tree allreduce not implemented yet; using mpi_builtin.\n");
+    }
 
     // Assign one GPU per MPI rank (round-robin within node)
     int n_gpus = 0;
@@ -210,8 +223,13 @@ int main(int argc, char** argv) {
             timer.stop_d2h();
 
             timer.start();
-            MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n,
-                          MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+            if (cfg.comm_algo == "ring") {
+                ring_allreduce_sum_inplace(h_grads, grad_n, MPI_COMM_WORLD);
+            } else {
+                // mpi_builtin, or temporary fallback for "tree"
+                MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n,
+                              MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+            }
             timer.stop_mpi();
 
             // Scale by 1/P then copy back to device (both counted as h2d overhead)

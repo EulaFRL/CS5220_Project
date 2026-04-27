@@ -23,6 +23,7 @@ set(SOURCES
     src/main.cpp
     src/data/data_loader.cpp
     src/mlp/mlp.cu
+    src/comm/ring_allreduce.cpp
 )
 
 add_executable(mlp_train ${SOURCES})
@@ -38,6 +39,12 @@ target_link_libraries(mlp_train PRIVATE
 set_target_properties(mlp_train PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
+
+add_executable(ring_allreduce_test src/tools/ring_allreduce_test.cpp
+    src/comm/ring_allreduce.cpp)
+target_include_directories(ring_allreduce_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(ring_allreduce_test PRIVATE MPI::MPI_CXX)
 
 # grad_check target added when src/grad_check.cpp exists (Phase 1 validation)
 if(EXISTS "${CMAKE_SOURCE_DIR}/src/grad_check.cpp")

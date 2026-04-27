@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mpi_mlp
-#SBATCH --account=m4776          # replace with your allocation
+#SBATCH --account=m4341_g       # course / default GPU account (change if needed)
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=4      # 4 MPI ranks per node = 4 GPUs per node
 #SBATCH --gpus-per-node=4
