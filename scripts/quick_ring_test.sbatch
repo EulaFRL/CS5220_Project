@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quick Phase-2 sanity: ring_allreduce_test + one short mlp_train with --algo ring.
+# Quick Phase-2: ring allreduce test + tree *reduce* (Task A) + mlp_train --algo ring.
 #
 # Usage (from project root, so SLURM_SUBMIT_DIR points here):
 #   mkdir -p logs
@@ -34,6 +34,12 @@ DATA="${ROOT}/data/fashion-mnist"
 
 echo "=== ring_allreduce_test (n=10007) ==="
 srun "${BUILD}/ring_allreduce_test" 10007
+
+echo "=== tree_reduce_test correctness (n=10007) ==="
+srun "${BUILD}/tree_reduce_test" 10007 0
+
+echo "=== tree_reduce_test n=64 + latency bench (Task A: small payload) ==="
+srun "${BUILD}/tree_reduce_test" 64 500
 
 echo "=== mlp_train ring 1 epoch ==="
 srun "${BUILD}/mlp_train" \

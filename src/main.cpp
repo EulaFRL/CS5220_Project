@@ -38,18 +38,16 @@ int main(int argc, char** argv) {
     Config cfg = parse_args(argc, argv);
     print_config(cfg, rank);
 
-    if (cfg.comm_algo != "mpi_builtin" && cfg.comm_algo != "ring" &&
-        cfg.comm_algo != "tree") {
-        if (rank == 0)
-            fprintf(stderr, "[Error] Unknown --algo %s (use mpi_builtin|ring|tree)\n",
+    if (cfg.comm_algo != "mpi_builtin" && cfg.comm_algo != "ring") {
+        if (rank == 0) {
+            fprintf(stderr,
+                    "[Error] Unknown --algo %s (use mpi_builtin|ring).\n"
+                    "Note: Task A tree *reduction* is in tree_reduce_test / comm/tree_reduce "
+                    "(not a gradient allreduce).\n",
                     cfg.comm_algo.c_str());
+        }
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    if (cfg.comm_algo == "tree" && rank == 0) {
-        fprintf(stderr,
-                "[Warn] Tree allreduce not implemented yet; using mpi_builtin.\n");
-    }
-
     // Assign one GPU per MPI rank (round-robin within node)
     int n_gpus = 0;
     CUDA_CHECK(cudaGetDeviceCount(&n_gpus));
@@ -226,7 +224,6 @@ int main(int argc, char** argv) {
             if (cfg.comm_algo == "ring") {
                 ring_allreduce_sum_inplace(h_grads, grad_n, MPI_COMM_WORLD);
             } else {
-                // mpi_builtin, or temporary fallback for "tree"
                 MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n,
                               MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
             }
