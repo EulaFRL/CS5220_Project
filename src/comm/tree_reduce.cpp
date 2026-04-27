@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <vector>
+#include <mpi.h>
 
 namespace {
 
@@ -45,19 +46,35 @@ void tree_reduce_sum(const float* sendbuf, float* recvbuf, int n, int root, MPI_
 
     for (int d = 0; d < max_level; d++) {
         const int stride = 1 << d;
-        if (L + stride >= P)
-            continue;
+        const int tag = tag_reduce_base + d;
 
-        if (L % (2 * stride) == 0) {
+        MPI_Request req_recv = MPI_REQUEST_NULL;
+        MPI_Request req_send = MPI_REQUEST_NULL;
+
+        // Two-phase + barriers: every receiver posts Irecv before any sender starts Isend.
+        // Interleaved Irecv/Isend across ranks can hang on Cray MPICH (no progress until Wait).
+        if (L + stride < P && L % (2 * stride) == 0) {
             const int peer = physical_rank(L + stride, root, P);
-            MPI_Recv(tmp.data(), n, MPI_FLOAT, peer, tag_reduce_base + d, comm,
-                     MPI_STATUS_IGNORE);
+            MPI_Irecv(tmp.data(), n, MPI_FLOAT, peer, tag, comm, &req_recv);
+        }
+        MPI_Barrier(comm);
+
+        if (L % (2 * stride) == stride) {
+            const int peer = physical_rank(L - stride, root, P);
+            MPI_Isend(acc.data(), n, MPI_FLOAT, peer, tag, comm, &req_send);
+        }
+
+        if (req_recv != MPI_REQUEST_NULL)
+            MPI_Wait(&req_recv, MPI_STATUS_IGNORE);
+        if (req_send != MPI_REQUEST_NULL)
+            MPI_Wait(&req_send, MPI_STATUS_IGNORE);
+
+        if (L + stride < P && L % (2 * stride) == 0) {
             for (int i = 0; i < n; i++)
                 acc[i] += tmp[i];
-        } else if (L % (2 * stride) == stride) {
-            const int peer = physical_rank(L - stride, root, P);
-            MPI_Send(acc.data(), n, MPI_FLOAT, peer, tag_reduce_base + d, comm);
         }
+
+        MPI_Barrier(comm);
     }
 
     if (rank == root)

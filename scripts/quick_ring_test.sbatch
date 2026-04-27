@@ -39,7 +39,7 @@ echo "=== tree_reduce_test correctness (n=10007) ==="
 srun "${BUILD}/tree_reduce_test" 10007 0
 
 echo "=== tree_reduce_test n=64 + latency bench (Task A: small payload) ==="
-srun "${BUILD}/tree_reduce_test" 64 3000
+srun "${BUILD}/tree_reduce_test" 64 500
 
 echo "=== mlp_train ring 1 epoch ==="
 srun "${BUILD}/mlp_train" \

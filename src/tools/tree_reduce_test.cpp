@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
         else
             printf("tree_reduce_test FAILED  n=%d  P=%d  root=%d  max|diff|=%g\n",
                    n, world, root, err);
+        fflush(stdout);
     }
 
     // Optional: latency for small n (shallow/narrow MLP gradients): tree vs MPI_Reduce.
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
             printf("bench  n=%d  P=%d  iters=%d\n", n, world, bench_iters);
             printf("  tree_reduce:  avg %.6e s  (~%.2f us/call)\n", sec_tree, sec_tree * 1e6);
             printf("  MPI_Reduce:   avg %.6e s  (~%.2f us/call)\n", sec_mpi, sec_mpi * 1e6);
+            fflush(stdout);
         }
     }
 

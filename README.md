@@ -295,6 +295,9 @@ cmake --build build -j
 MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=4 ./build/tree_reduce_test 64 2000
 # argv: [n] [bench_iters]  — bench_iters 0 skips timing; >0 prints tree vs MPI_Reduce latency on rank 0
 sbatch scripts/quick_tree_test.sbatch
+# GPU-node allocation (matches many course policies); binary is still CPU-only.
+# Pure-CPU Slurm (if your account allows): `sbatch scripts/quick_tree_test_cpu.sbatch`
+# No batch script: inside `salloc`, `source scripts/env_cpu_mpi.sh` (sets `MPICH_GPU_SUPPORT_ENABLED=0` on GPU nodes), then `bash scripts/run_mpi_comm_local.sh` or `srun .../tree_reduce_test` (Cray has no mpirun; script uses `srun` when SLURM_JOB_ID is set)
 ```
 
 **Task B — Ring allreduce:** `ring_allreduce_sum_inplace` in `src/comm/ring_allreduce.cpp`; training uses `--algo ring`. Correctness:
