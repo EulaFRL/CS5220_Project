@@ -1,0 +1,243 @@
+================================================================
+  Distributed MLP Training: Ring vs Tree AllReduce on GPU Clusters
+  CS 5220 — Systems Programming for Applications in Science
+  Eula Wang · [Teammate Name]  |  Cornell University, Spring 2026
+================================================================
+
+
+────────────────────────────────────────────────────────────────
+ABSTRACT
+────────────────────────────────────────────────────────────────
+We implement a data-parallel multi-layer perceptron (MLP) trainer
+from scratch using MPI, CUDA, and cuBLAS, and evaluate two custom
+gradient aggregation algorithms — Ring AllReduce and Tree Reduce —
+against MPI's built-in AllReduce on NERSC Perlmutter (A100 GPUs,
+Slingshot-11 interconnect). Across small and large networks we find
+that Ring AllReduce consistently outperforms Tree Reduce in the
+bandwidth-dominated regime, while MPI built-in remains competitive
+overall. Communication overhead limits strong-scaling efficiency to
+33% at P=8, motivating overlapping computation with communication
+as future work.
+
+
+────────────────────────────────────────────────────────────────
+1. INTRODUCTION & MOTIVATION
+────────────────────────────────────────────────────────────────
+Training neural networks at scale requires efficient gradient
+synchronization across GPUs. The de facto industry approach
+(NCCL, Horovod, PyTorch DDP) hides this complexity, but
+understanding the underlying communication primitives — and their
+performance trade-offs — is essential for systems-level reasoning.
+
+This project answers two concrete questions:
+  (1) How do Ring AllReduce and Tree Reduce compare in practice
+      on a real HPC interconnect (Slingshot-11)?
+  (2) How much does gradient synchronization limit scaling
+      efficiency as we add GPUs?
+
+We train on Fashion-MNIST (60,000 training images, 10 classes,
+784 features) and measure accuracy, loss, and fine-grained
+communication timing across P = 1, 2, 4, 8 GPUs.
+
+[Figure 1: Data-parallel training pipeline]
+
+
+────────────────────────────────────────────────────────────────
+2. SYSTEM DESIGN
+────────────────────────────────────────────────────────────────
+Architecture:
+  • Each MPI rank owns one GPU and one disjoint data shard
+  • One batch per step: forward → backward → AllReduce → SGD update
+  • No parameter server; pure data-parallel synchronous SGD
+
+Key implementation choices:
+  • cuBLAS SGEMM for all forward/backward matrix multiplications
+    (column-major layout throughout to match cuBLAS convention)
+  • ReLU activations on hidden layers; Softmax + cross-entropy loss
+    on output layer (fused kernel: forward + loss + dZ in one pass)
+  • He initialization: W ~ N(0, sqrt(2 / fan_in))
+  • Gradients staged through pinned host memory before MPI
+    (MPICH_GPU_SUPPORT_ENABLED=0; no CUDA-aware MPI needed)
+  • 3-phase timing: D→H memcpy | pure MPI | H→D memcpy + scale
+
+Hardware:
+  • NERSC Perlmutter — 2 nodes × 4 A100 GPUs (40 GB SXM4)
+  • Slingshot-11 interconnect (200 Gb/s per port)
+  • GPU assignment: local_rank = global_rank % GPUs_per_node
+
+
+────────────────────────────────────────────────────────────────
+3. COMMUNICATION ALGORITHMS
+────────────────────────────────────────────────────────────────
+[Figure 2: Ring AllReduce vs Tree Reduce topology]
+
+Ring AllReduce:
+  Phase 1 — Reduce-Scatter: each rank sends chunk i to right
+    neighbor and accumulates chunk i-1 from left neighbor.
+    Repeats P-1 times. After this phase, each rank holds the
+    fully-reduced sum of one N/P-sized chunk.
+  Phase 2 — All-Gather: each rank broadcasts its reduced chunk
+    to all others. P-1 more rounds.
+  Total steps: 2(P-1)   Data sent per rank: 2(P-1)/P · N floats
+  No barriers; communication overlaps between phases.
+
+Tree Reduce + Broadcast:
+  Phase 1 — Binomial tree reduce to root (rank 0):
+    Level d: nodes whose logical rank satisfies r mod 2^(d+1) = 0
+    receive from r + 2^d and accumulate.  ⌈log₂P⌉ levels total.
+  Phase 2 — MPI_Bcast from root to all ranks.
+  Total steps: 2⌈log₂P⌉   Data sent per rank: 2⌈log₂P⌉ · N floats
+  Requires 2 MPI_Barriers per tree level (Cray MPICH deadlock fix).
+
+Theoretical cost model (α-β):
+  T_ring ≈ 2(P-1)/P · (α + β·N)
+  T_tree ≈ 2⌈log₂P⌉  · (α + β·N)
+
+  For large N (bandwidth-dominated):  ring wins (smaller prefactor)
+  For tiny N (latency-dominated):     tree wins (fewer round trips)
+  Crossover N*: where prefactors equalize — for P=4, roughly N<15K
+
+
+────────────────────────────────────────────────────────────────
+4. RESULTS — ALGORITHM COMPARISON
+────────────────────────────────────────────────────────────────
+[Figure 3: Per-epoch MPI AllReduce time — bar chart]
+
+All measurements: P=4 and P=8, 2 nodes, epoch 3-5 average
+(epoch 1 excluded: cuBLAS handle warmup inflates compute time)
+
+Small network: 784→64→10  (N = 50,890 gradient floats, ~200 KB)
+  Latency-dominated regime — all algorithms within 2× of each other
+  P=4:  builtin=5.97 ms   ring=6.10 ms   tree=13.67 ms
+  P=8:  builtin=5.27 ms   ring=7.27 ms   tree= 8.37 ms
+  → Tree is slowest due to MPI_Barrier overhead (2 barriers/level)
+  → Ring and builtin nearly identical; latency α dominates
+
+Large network: 784→2048→2048→2048→10  (N = 5,824,522 floats, ~22 MB)
+  Bandwidth-dominated regime — algorithm differences are stark
+  P=4:  builtin=823 ms    ring=689 ms    tree=2697 ms
+  P=8:  builtin=604 ms    ring=482 ms    tree=1570 ms
+  → Ring beats builtin by 16% (P=4) and 20% (P=8)
+  → Tree is 3-4× slower than ring; bandwidth disadvantage compounds
+     with barrier overhead (Barrier cost scales with N due to sync)
+
+Key takeaway: Ring AllReduce is the algorithm of choice for large
+gradient tensors. Tree Reduce's latency advantage never materializes
+here because the Barrier synchronization cost dominates for P≤8.
+
+
+────────────────────────────────────────────────────────────────
+5. RESULTS — STRONG SCALING
+────────────────────────────────────────────────────────────────
+[Figure 4: Strong scaling — epoch time and time breakdown]
+
+Network: 784→512→256→10  (N = 535,818 gradient floats, ~2 MB)
+Algorithm: MPI built-in AllReduce  |  batch = 256 per rank
+
+  P=1:  0.1665 s  (1.0×)   mpi%=0%
+  P=2:  0.1185 s  (1.4×)   mpi%≈39%
+  P=4:  0.1038 s  (1.6×)   mpi%≈63%
+  P=8:  0.0623 s  (2.7×)   mpi%≈70%
+
+  Ideal speedup at P=8 would be 8×; actual is 2.7×.
+  Parallel efficiency drops from 70% at P=2 to 33% at P=8.
+
+Time breakdown (per epoch):
+  Compute time halves with each doubling of P (good scaling).
+  MPI time stays roughly constant at ~35–50 ms regardless of P.
+  → Amdahl's Law: the serial (communication) fraction dominates.
+
+Why is MPI time nearly constant?
+  The gradient size N = 535,818 floats is fixed regardless of P.
+  Adding more ranks reduces compute load but does not reduce the
+  amount of data that must be aggregated — it just adds more
+  participants, increasing synchronization cost slightly.
+
+
+────────────────────────────────────────────────────────────────
+6. THEORETICAL ANALYSIS — α-β MODEL FIT
+────────────────────────────────────────────────────────────────
+[Figure 5: α-β scatter plot + linear fit]
+
+We fit T_allreduce = α + β·N to three measurements at P=4
+(MPI built-in, epochs 3-5 average):
+
+  N =    50,890 floats  →  T =   5.97 ms
+  N =   535,818 floats  →  T =  50.1  ms
+  N = 5,824,522 floats  →  T = 823.2  ms
+
+Fit result (least squares):
+  β ≈ 1.43 × 10⁻⁴ ms/float  (R² ≈ 0.9997)
+  α ≈ −13 ms  (negative intercept: model artifact, 3-point fit)
+
+Effective bandwidth (ring formula, P=4):
+  W = 2(P-1)/P · 4 bytes / β ≈ 42 MB/s per rank
+
+Interpretation:
+  • R²=0.9997 confirms the linear model captures bandwidth scaling
+    almost perfectly across two orders of magnitude of N.
+  • Effective bandwidth of 42 MB/s is far below Slingshot-11's
+    theoretical peak (~25 GB/s). The bottleneck is likely CPU
+    memory bandwidth during MPI buffer staging (22 MB gradient
+    does not fit in L3 cache), not network bandwidth.
+  • The negative α reflects that latency effects are negligible
+    at these gradient sizes; a pure bandwidth model suffices.
+
+
+────────────────────────────────────────────────────────────────
+7. CONCLUSION
+────────────────────────────────────────────────────────────────
+We built a complete data-parallel MLP training stack — cuBLAS
+forward/backward, custom communication primitives, and fine-grained
+3-phase timing — and benchmarked it on Perlmutter A100 GPUs.
+
+Findings:
+  1. Ring AllReduce outperforms Tree Reduce for large gradients
+     (16-20% faster than MPI built-in; tree is 3-4× slower).
+  2. Tree Reduce's theoretical latency advantage is masked by
+     MPI_Barrier overhead for P≤8.
+  3. Strong-scaling efficiency reaches only 33% at P=8 because
+     MPI gradient synchronization is the bottleneck, not compute.
+  4. Effective cross-node AllReduce bandwidth is ~42 MB/s, limited
+     by CPU memory bandwidth during gradient staging, not the
+     Slingshot-11 network fabric.
+
+Future work:
+  • Overlap gradient AllReduce with forward pass of the next batch
+  • CUDA-aware MPI to eliminate D→H→D copies
+  • Gradient compression to reduce communication volume
+
+
+────────────────────────────────────────────────────────────────
+REFERENCES
+────────────────────────────────────────────────────────────────
+[1] Patarasuk & Yuan. "Bandwidth optimal all-reduce algorithms for
+    clusters of workstations." J. Parallel Distrib. Comput., 2009.
+[2] Thakur et al. "Optimization of Collective Communication
+    Operations in MPICH." IJHPCA, 2005.
+[3] Sergeev & Del Balso. "Horovod: fast and easy distributed deep
+    learning in TensorFlow." arXiv:1802.05799, 2018.
+[4] Xiao et al. "Fashion-MNIST: a Novel Image Dataset for
+    Benchmarking Machine Learning Algorithms." arXiv:1708.07747, 2017.
+
+
+────────────────────────────────────────────────────────────────
+FIGURE LIST (to be inserted by author)
+────────────────────────────────────────────────────────────────
+Fig 1 — Data-parallel SGD pipeline diagram
+        Source: figures/fig1_pipeline.py
+
+Fig 2 — Ring AllReduce vs Tree Reduce communication topology
+        Source: figures/fig2_topology.py
+
+Fig 3 — Per-epoch MPI time bar chart (small vs large network,
+        P=4 and P=8, three algorithms)
+        Source: figures/fig3_mpi_bar.py
+
+Fig 4 — Strong scaling: epoch time + time breakdown stacked bar
+        (P=1,2,4,8; network 784→512→256→10)
+        Source: figures/fig4_scaling.py
+
+Fig 5 — α-β model scatter plot + linear fit
+        (P=4, MPI built-in, three network sizes)
+        Source: figures/fig5_alpha_beta.py
