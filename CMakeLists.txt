@@ -24,6 +24,7 @@ set(SOURCES
     src/data/data_loader.cpp
     src/mlp/mlp.cu
     src/comm/ring_allreduce.cpp
+    src/comm/tree_reduce.cpp
 )
 
 add_executable(mlp_train ${SOURCES})

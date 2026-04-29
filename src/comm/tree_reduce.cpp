@@ -80,3 +80,18 @@ void tree_reduce_sum(const float* sendbuf, float* recvbuf, int n, int root, MPI_
     if (rank == root)
         std::memcpy(recvbuf, acc.data(), (size_t)n * sizeof(float));
 }
+
+void tree_allreduce_sum_inplace(float* buf, int n, MPI_Comm comm) {
+    int rank = 0, P = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &P);
+
+    if (P == 1 || n == 0)
+        return;
+
+    std::vector<float> tmp((size_t)n);
+    tree_reduce_sum(buf, tmp.data(), n, /*root=*/0, comm);
+    if (rank == 0)
+        std::memcpy(buf, tmp.data(), (size_t)n * sizeof(float));
+    MPI_Bcast(buf, n, MPI_FLOAT, 0, comm);
+}

@@ -13,7 +13,7 @@ struct Config {
     int   batch_size  = 256;   // per rank
     int   epochs      = 10;
 
-    // "mpi_builtin" | "ring"  (tree sum-reduction: see tree_reduce_test / comm/tree_reduce)
+    // "mpi_builtin" | "ring" | "tree"
     std::string comm_algo = "mpi_builtin";
 
     std::string data_dir = "./data/fashion-mnist";

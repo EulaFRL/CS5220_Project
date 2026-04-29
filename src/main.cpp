@@ -14,6 +14,7 @@
 #include "data/data_loader.h"
 #include "mlp/mlp.h"
 #include "comm/ring_allreduce.h"
+#include "comm/tree_reduce.h"
 
 // ---------------------------------------------------------------------------
 // Convenience macro for CUDA in main()
@@ -38,14 +39,12 @@ int main(int argc, char** argv) {
     Config cfg = parse_args(argc, argv);
     print_config(cfg, rank);
 
-    if (cfg.comm_algo != "mpi_builtin" && cfg.comm_algo != "ring") {
-        if (rank == 0) {
-            fprintf(stderr,
-                    "[Error] Unknown --algo %s (use mpi_builtin|ring).\n"
-                    "Note: Task A tree *reduction* is in tree_reduce_test / comm/tree_reduce "
-                    "(not a gradient allreduce).\n",
+    if (cfg.comm_algo != "mpi_builtin" &&
+        cfg.comm_algo != "ring" &&
+        cfg.comm_algo != "tree") {
+        if (rank == 0)
+            fprintf(stderr, "[Error] Unknown --algo %s (use mpi_builtin|ring|tree).\n",
                     cfg.comm_algo.c_str());
-        }
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     // Assign one GPU per MPI rank (round-robin within node)
@@ -223,6 +222,8 @@ int main(int argc, char** argv) {
             timer.start();
             if (cfg.comm_algo == "ring") {
                 ring_allreduce_sum_inplace(h_grads, grad_n, MPI_COMM_WORLD);
+            } else if (cfg.comm_algo == "tree") {
+                tree_allreduce_sum_inplace(h_grads, grad_n, MPI_COMM_WORLD);
             } else {
                 MPI_Allreduce(MPI_IN_PLACE, h_grads, grad_n,
                               MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
