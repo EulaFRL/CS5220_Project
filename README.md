@@ -152,7 +152,7 @@ MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=8 build/mlp_train \
 
 # Large: expect ring to win in Phase 2
 MPICH_GPU_SUPPORT_ENABLED=0 srun --ntasks=8 build/mlp_train \
-  --layers 784,2048,2048,2048,10 --batch 256 --epochs 5 --algo ring
+  --layers 784,2048,2048,10 --batch 256 --epochs 5 --algo ring
 ```
 
 ---
